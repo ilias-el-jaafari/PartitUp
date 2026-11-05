@@ -1,5 +1,6 @@
 import { WorkerSynthesizer, Sequencer, audioBufferToWav } from 'spessasynth_lib'
 import { loadSoundFont } from './soundfontLoader'
+import { withoutSustainPedal } from './midiChannels'
 import type { VoiceDefinition } from '../../types/voice'
 
 let audioContext: AudioContext | null = null
@@ -131,6 +132,7 @@ export function getAudioEngine() {
 }
 
 export async function loadMidiData(midiBase64: string) {
+  midiBase64 = withoutSustainPedal(midiBase64)
   const { sequencer: seq } = await initAudioEngine()
 
   const binaryString = atob(midiBase64)
@@ -220,6 +222,7 @@ export async function renderToWav(
   const { synth: s } = await initAudioEngine()
   if (!s) throw new Error('Sintetizador no inicializado')
 
+  midiBase64 = withoutSustainPedal(midiBase64)
   const binaryString = atob(midiBase64)
   const bytes = new Uint8Array(binaryString.length)
   for (let i = 0; i < binaryString.length; i++) {

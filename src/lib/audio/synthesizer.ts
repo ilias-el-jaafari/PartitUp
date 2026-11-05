@@ -6,39 +6,124 @@ let audioContext: AudioContext | null = null
 let synth: WorkerSynthesizer | null = null
 let sequencer: Sequencer | null = null
 let worker: Worker | null = null
+let masterGain: GainNode | null = null
+let removeResumeListeners: (() => void) | null = null
 let initialized = false
+let initPromise: Promise<{ synth: WorkerSynthesizer; sequencer: Sequencer }> | null = null
+
+// SpessaSynth's playback worklet publishes the notes on outputs 1–16 (one
+// stereo pair per MIDI channel). Output 0 is only the effects bus and is
+// nearly silent with our soundfont. Offline WAV rendering mixes every channel
+// into a single buffer, which is why the download sounds right. Connecting
+// the worklet straight to the speakers leaves Safari/iOS (and some Chromium
+// builds) playing output 0 only. Each output therefore goes through its own
+// gain into one stereo master before the destination.
+const AUDIBLE_OUTPUTS = 17
+
+function connectAudibleOutputs(node: AudioWorkletNode, context: AudioContext) {
+  const master = context.createGain()
+  master.gain.value = 1
+  const outputs = Math.min(node.numberOfOutputs, AUDIBLE_OUTPUTS)
+  for (let i = 0; i < outputs; i++) {
+    const tap = context.createGain()
+    node.connect(tap, i)
+    tap.connect(master)
+  }
+  master.connect(context.destination)
+  return master
+}
+
+function installResumeOnGesture(context: AudioContext) {
+  removeResumeListeners?.()
+  const resume = () => {
+    if (context.state === 'suspended') void context.resume()
+  }
+  window.addEventListener('pointerdown', resume, true)
+  window.addEventListener('keydown', resume, true)
+  removeResumeListeners = () => {
+    window.removeEventListener('pointerdown', resume, true)
+    window.removeEventListener('keydown', resume, true)
+  }
+}
+
+// Must run synchronously inside the play gesture. Safari ignores resume()
+// once the handler has awaited anything else.
+export function resumeAudioContext() {
+  if (audioContext?.state === 'suspended') {
+    void audioContext.resume()
+  }
+}
+
+let songWaitId = 0
+
+function waitForSong(seq: Sequencer): Promise<void> {
+  const id = `partitup-song-ready-${++songWaitId}`
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timeout)
+      seq.eventHandler.removeEvent('songChange', id)
+      resolve()
+    }
+    const timeout = setTimeout(done, 5000)
+    seq.eventHandler.addEvent('songChange', id, done)
+  })
+}
 
 export async function initAudioEngine(): Promise<{ synth: WorkerSynthesizer; sequencer: Sequencer }> {
   if (initialized && synth && sequencer) {
     return { synth, sequencer }
   }
+  if (initPromise) return initPromise
 
-  audioContext = new AudioContext()
+  initPromise = (async () => {
+    audioContext = new AudioContext()
+    installResumeOnGesture(audioContext)
 
-  // Register the inline playback worklet (sends audio from the worker to output).
-  await WorkerSynthesizer.registerPlaybackWorklet(audioContext)
+    // Register the inline playback worklet (sends audio from the worker to output).
+    await WorkerSynthesizer.registerPlaybackWorklet(audioContext)
 
-  // The worker runs the actual synthesis (WorkerSynthesizerCore). Inlining the
-  // `new URL(...)` inside `new Worker(...)` lets Vite bundle the worker for
-  // production correctly.
-  worker = new Worker(new URL('./synth.worker.ts', import.meta.url), { type: 'module' })
+    // The worker runs the actual synthesis (WorkerSynthesizerCore). Inlining the
+    // `new URL(...)` inside `new Worker(...)` lets Vite bundle the worker for
+    // production correctly.
+    worker = new Worker(new URL('./synth.worker.ts', import.meta.url), { type: 'module' })
 
-  synth = new WorkerSynthesizer(audioContext, worker.postMessage.bind(worker))
-  worker.onmessage = (e) => synth!.handleWorkerMessage(e.data)
+    synth = new WorkerSynthesizer(audioContext, worker.postMessage.bind(worker))
+    worker.onmessage = (e) => synth!.handleWorkerMessage(e.data)
 
-  synth.connect(audioContext.destination)
+    const node = (synth as unknown as { worklet: AudioWorkletNode }).worklet
+    masterGain = connectAudibleOutputs(node, audioContext)
 
-  // Wait until the worker synthesizer has signalled it is ready before
-  // loading the SoundFont — otherwise addSoundBank() may never resolve.
-  await synth.isReady
+    // Wait until the worker synthesizer has signalled it is ready before
+    // loading the SoundFont — otherwise addSoundBank() may never resolve.
+    await synth.isReady
 
-  const soundFontBuffer = await loadSoundFont()
-  await synth.soundBankManager.addSoundBank(soundFontBuffer, 'main')
+    const soundFontBuffer = await loadSoundFont()
+    await synth.soundBankManager.addSoundBank(soundFontBuffer, 'main')
 
-  sequencer = new Sequencer(synth, { skipToFirstNoteOn: true })
+    sequencer = new Sequencer(synth, { skipToFirstNoteOn: true })
 
-  initialized = true
-  return { synth, sequencer }
+    initialized = true
+    return { synth, sequencer }
+  })()
+
+  try {
+    return await initPromise
+  } catch (err) {
+    initPromise = null
+    if (!initialized) {
+      removeResumeListeners?.()
+      removeResumeListeners = null
+      masterGain?.disconnect()
+      worker?.terminate()
+      void audioContext?.close()
+      synth = null
+      sequencer = null
+      worker = null
+      audioContext = null
+      masterGain = null
+    }
+    throw err
+  }
 }
 
 export function getAudioEngine() {
@@ -54,11 +139,15 @@ export async function loadMidiData(midiBase64: string) {
     bytes[i] = binaryString.charCodeAt(i)
   }
 
+  const ready = waitForSong(seq)
   seq.loadNewSongList([{ binary: bytes.buffer as ArrayBuffer }])
+  await ready
 }
 
 export async function play() {
+  resumeAudioContext()
   const { sequencer: seq } = await initAudioEngine()
+  resumeAudioContext()
   if (audioContext?.state === 'suspended') {
     await audioContext.resume()
   }
@@ -152,11 +241,16 @@ export async function renderToWav(
 
 export function destroyAudioEngine() {
   sequencer?.pause()
+  removeResumeListeners?.()
+  removeResumeListeners = null
+  masterGain?.disconnect()
   worker?.terminate()
   audioContext?.close()
   synth = null
   sequencer = null
   worker = null
   audioContext = null
+  masterGain = null
+  initPromise = null
   initialized = false
 }

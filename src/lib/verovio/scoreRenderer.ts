@@ -1,6 +1,7 @@
 import type { VerovioToolkit } from 'verovio/esm'
 import { getVerovioToolkit } from './verovioInstance'
 import { stripNonVocalParts } from '../musicxml/voiceIdentifier'
+import { normalizeChoirRhythm } from '../musicxml/choirRhythm'
 import type { SoundingNote } from '../audio/midiChannels'
 
 export interface RenderResult {
@@ -42,19 +43,21 @@ export async function loadScore(musicXml: string): Promise<RenderResult> {
   const tk = await getVerovioToolkit()
   currentToolkit = tk
 
-  tk.loadData(musicXml)
+  // Repair bar-length and broken ties before Verovio schedules the MIDI.
+  const xml = normalizeChoirRhythm(musicXml)
+  tk.loadData(xml)
   const pageCount = tk.getPageCount()
   const svg = tk.renderToSVG(1)
   const mei = (tk as unknown as { getMEI: (o: object) => string }).getMEI({})
   const sounding = readSoundingNotes(tk)
   const midi = tk.renderToMIDI()
 
-  const vocalOnlyXml = stripNonVocalParts(musicXml)
+  const vocalOnlyXml = stripNonVocalParts(xml)
   let fallbackMidi = midi
-  if (vocalOnlyXml !== musicXml) {
+  if (vocalOnlyXml !== xml) {
     tk.loadData(vocalOnlyXml)
     fallbackMidi = tk.renderToMIDI()
-    tk.loadData(musicXml)
+    tk.loadData(xml)
   }
 
   return { svg, pageCount, midi, fallbackMidi, mei, sounding }

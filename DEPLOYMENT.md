@@ -27,7 +27,8 @@ El backend necesita Java + Audiveris + Tesseract, por eso se despliega con Docke
 5. Cuando termine, en **Settings → Networking** pulsa **Generate Domain**.
    Obtendras una URL del tipo `https://partitup-xxxx.up.railway.app`.
 6. Comprueba que funciona abriendo `https://partitup-xxxx.up.railway.app/health`
-   → debe responder `{"status":"ok"}`.
+   → debe responder `{"status":"ok", ...}`. El campo `engine` dice qué estrategia
+   está activa (`auto` en la imagen de Railway: Audiveris para PDF, oemer para fotos).
 
 > **Nota sobre la capa gratuita**: Railway da un credito mensual de ejecucion.
 > Para uso personal/por invitacion es mas que suficiente. Si el servicio se
@@ -57,8 +58,10 @@ El backend necesita Java + Audiveris + Tesseract, por eso se despliega con Docke
 
 - El frontend usa `VITE_OMR_API_URL` para saber a donde enviar las imagenes/PDF.
   Si no se define, intenta `/api` (util solo en desarrollo local con proxy).
-- El backend tiene **CORS abierto**, asi que el navegador puede llamarlo desde
-  el dominio de Vercel sin problemas.
+- El backend solo acepta orígenes de la lista: `https://partit-up.vercel.app`,
+  localhost en los puertos de Vite, y (salvo `CORS_ALLOW_VERCEL_PREVIEWS=0`) los
+  previews `https://partit-up*.vercel.app`. Para otro dominio, añade
+  `CORS_ORIGINS` (lista separada por comas) en el servicio. No hace falta ningún secreto.
 - El SoundFont (~8MB) y el motor de notacion se sirven desde Vercel con cache
   de larga duracion; en el movil se descargan una sola vez por dispositivo.
 
@@ -78,8 +81,11 @@ npm install
 npm run dev        # http://localhost:5173, con proxy /api -> localhost:3001
 ```
 
-Para subir solo MusicXML/MIDI no hace falta el backend; solo se necesita para
-imagenes y PDF.
+Para subir solo MusicXML no hace falta el backend; solo se necesita para
+imagenes y PDF. Los MIDI no se aceptan: no traen la partitura.
+
+Variables de entorno del servidor (motores, CORS, tamaño de subida) están en el
+README, sección «Motores OMR». No hay secretos que commitear.
 
 ---
 
@@ -89,5 +95,5 @@ imagenes y PDF.
 2. Sube una foto o PDF de una partitura coral.
 3. Espera a que el backend la convierta (indicador de "Procesando...").
 4. Comprueba que las voces aparecen coloreadas e identificadas.
-5. Corrige asignaciones si hace falta, selecciona voces y pulsa reproducir.
-6. Descarga el audio en WAV.
+5. Elige tu voz (suena sola). Corrige una nota solo si el reconocimiento falló.
+6. Descarga el WAV. El nombre incluye la obra, la voz y la fecha.

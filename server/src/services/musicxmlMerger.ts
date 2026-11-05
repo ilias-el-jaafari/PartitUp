@@ -19,11 +19,18 @@ export function mergeMusicXmlPages(pages: string[]): string {
   for (let pageIdx = 1; pageIdx < pages.length; pageIdx++) {
     const pageXml = pages[pageIdx]
     const pagePartIds = extractPartIds(pageXml)
+    // Audiveris sometimes renames parts per page. If no id is shared, zip by order.
+    const shared = basePartIds.some((id) => pagePartIds.includes(id))
+    const aligned = shared
+      ? basePartIds
+      : basePartIds.map((id, i) => pagePartIds[i] ?? id)
 
-    for (const partId of basePartIds) {
-      if (!pagePartIds.includes(partId)) continue
+    for (let partIndex = 0; partIndex < basePartIds.length; partIndex++) {
+      const partId = basePartIds[partIndex]
+      const sourceId = aligned[partIndex]
+      if (!sourceId || !pagePartIds.includes(sourceId)) continue
 
-      const pageMeasures = extractMeasures(pageXml, partId)
+      const pageMeasures = extractMeasures(pageXml, sourceId)
       if (pageMeasures.length === 0) continue
 
       const renumbered = pageMeasures.map((m, i) => {
@@ -43,7 +50,8 @@ export function mergeMusicXmlPages(pages: string[]): string {
       }
     }
 
-    const pageMeasureCount = countMeasures(pageXml, basePartIds[0])
+    const countId = aligned[0] && pagePartIds.includes(aligned[0]) ? aligned[0] : pagePartIds[0]
+    const pageMeasureCount = countId ? countMeasures(pageXml, countId) : 0
     baseMeasureCount += pageMeasureCount
   }
 

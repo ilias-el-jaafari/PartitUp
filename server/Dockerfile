@@ -84,8 +84,10 @@ RUN /opt/oemer-venv/bin/python -c "from PIL import Image; Image.new('RGB',(400,4
     && (/opt/oemer-venv/bin/oemer /tmp/blank.png -o /tmp || true) \
     && rm -f /tmp/blank.png /tmp/blank*.musicxml
 
-# Default OMR engine: oemer (neural). Set OMR_ENGINE=audiveris to switch.
-ENV OMR_ENGINE=oemer
+# auto: PDF → Audiveris first (engraved choir scores), photos → oemer first.
+# Both engines are installed here; the other is the fallback. Override with
+# OMR_ENGINE=audiveris or OMR_ENGINE=oemer. OMR_FALLBACK=0 disables fallback.
+ENV OMR_ENGINE=auto
 
 WORKDIR /app
 

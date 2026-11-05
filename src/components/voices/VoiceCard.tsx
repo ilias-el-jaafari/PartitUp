@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { Volume2, VolumeX, Headphones } from 'lucide-react'
 import type { VoiceDefinition } from '../../types/voice'
 import { VoiceType, VOICE_LABELS } from '../../types/voice'
@@ -23,6 +24,8 @@ export function VoiceCard({ voice }: VoiceCardProps) {
   const toggleSolo = useVoiceStore((s) => s.toggleSolo)
   const setVolume = useVoiceStore((s) => s.setVolume)
   const changeVoiceType = useVoiceStore((s) => s.changeVoiceType)
+  const uncertain = voice.confidence < 0.75
+  const [showType, setShowType] = useState(uncertain)
 
   return (
     <div
@@ -78,17 +81,27 @@ export function VoiceCard({ voice }: VoiceCardProps) {
         </button>
       </div>
 
-      <select
-        value={voice.type}
-        onChange={(e) => changeVoiceType(voice.id, e.target.value as VoiceType)}
-        className="w-full text-sm font-medium rounded border border-gray-200 px-2 py-1 mb-2 bg-white focus:outline-none focus:ring-1 focus:ring-blue-400"
-        style={{ borderLeftColor: voice.color, borderLeftWidth: 3 }}
-      >
-        {ASSIGNABLE_TYPES.map((t) => (
-          <option key={t} value={t}>{VOICE_LABELS[t]}</option>
-        ))}
-        <option value={VoiceType.UNASSIGNED}>Sin asignar</option>
-      </select>
+      {showType ? (
+        <select
+          value={voice.type}
+          onChange={(e) => changeVoiceType(voice.id, e.target.value as VoiceType)}
+          className="w-full text-sm font-medium rounded border border-gray-200 px-2 py-1 mb-2 bg-white focus:outline-none focus:ring-1 focus:ring-blue-400"
+          style={{ borderLeftColor: voice.color, borderLeftWidth: 3 }}
+        >
+          {ASSIGNABLE_TYPES.map((t) => (
+            <option key={t} value={t}>{VOICE_LABELS[t]}</option>
+          ))}
+          <option value={VoiceType.UNASSIGNED}>Sin asignar</option>
+        </select>
+      ) : (
+        <button
+          type="button"
+          onClick={() => setShowType(true)}
+          className="text-[11px] text-gray-400 hover:text-gray-600 mb-2"
+        >
+          Cambiar cuerda
+        </button>
+      )}
 
       <input
         type="range"

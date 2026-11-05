@@ -1,5 +1,3 @@
-import { execFile } from 'child_process'
-import { promisify } from 'util'
 import path from 'path'
 import os from 'os'
 import fs from 'fs/promises'
@@ -7,19 +5,25 @@ import { unzipSync, strFromU8 } from 'fflate'
 import { mergeMusicXmlPages } from './musicxmlMerger.js'
 import { preprocessImage } from './imagePreprocess.js'
 import { runOemer } from './oemer.js'
-
-const execFileAsync = promisify(execFile)
+import { chooseEngine, type OmrEngineName } from './engineStrategy.js'
+import { execFileCancelable } from './execFile.js'
 
 const AUDIVERIS_CMD = process.env.AUDIVERIS_CMD || 'audiveris'
 const USE_XVFB = process.env.USE_XVFB === '1'
 
-// Which OMR engine to use: 'oemer' (neural, default) or 'audiveris'. Whichever
-// is primary, the other is used as a fallback when the primary yields nothing.
-const OMR_ENGINE = (process.env.OMR_ENGINE || 'oemer').toLowerCase()
+export interface OmrProgress {
+  stage: 'preprocess' | 'rasterize' | 'recognize' | 'cleanup'
+  page?: number
+  pageCount?: number
+  message: string
+}
 
-// Whether Audiveris is installed. On the lean HF image it isn't, so the
-// fallback must be skipped to return clean errors instead of spawn failures.
-// Honors AUDIVERIS_AVAILABLE (0/1); otherwise probes an absolute AUDIVERIS_CMD.
+export interface OmrRunOptions {
+  onProgress?: (progress: OmrProgress) => void
+  signal?: AbortSignal
+  inputKind?: 'pdf' | 'image'
+}
+
 let audiverisAvailable: boolean | null = null
 async function isAudiverisAvailable(): Promise<boolean> {
   if (audiverisAvailable !== null) return audiverisAvailable
@@ -29,30 +33,63 @@ async function isAudiverisAvailable(): Promise<boolean> {
     audiverisAvailable = await fs.access(AUDIVERIS_CMD).then(() => true).catch(() => false)
     return audiverisAvailable
   }
-  // Bare command name with no explicit flag: assume present on PATH.
   return (audiverisAvailable = true)
 }
 
-// Run a single image through the configured OMR engine, falling back to the
-// other engine if the primary produces no usable result (and it's installed).
-async function runEngine(filePath: string): Promise<string | null> {
-  if (OMR_ENGINE === 'audiveris') {
-    const primary = await processOneFile(filePath)
-    if (primary) return primary
-    console.warn('[omr] Audiveris produced no result, trying oemer')
-    return runOemer(filePath)
+let oemerAvailable: boolean | null = null
+async function isOemerAvailable(): Promise<boolean> {
+  if (oemerAvailable !== null) return oemerAvailable
+  const cmd = process.env.OEMER_CMD || 'oemer'
+  if (cmd.startsWith('/')) {
+    oemerAvailable = await fs.access(cmd).then(() => true).catch(() => false)
+    return oemerAvailable
+  }
+  return (oemerAvailable = true)
+}
+
+function throwIfCancelled(signal?: AbortSignal) {
+  if (signal?.aborted) {
+    const err = new Error('Reconocimiento cancelado')
+    err.name = 'AbortError'
+    throw err
+  }
+}
+
+async function runNamed(
+  engine: OmrEngineName,
+  filePath: string,
+  signal?: AbortSignal
+): Promise<string | null> {
+  if (engine === 'audiveris') return processOneFile(filePath, signal)
+  return runOemer(filePath, signal)
+}
+
+async function runEngine(
+  filePath: string,
+  inputKind: 'pdf' | 'image',
+  signal?: AbortSignal
+): Promise<string | null> {
+  throwIfCancelled(signal)
+  const configured = (process.env.OMR_ENGINE || 'auto').toLowerCase()
+  const choice = chooseEngine({
+    configured,
+    inputKind,
+    audiverisAvailable: await isAudiverisAvailable(),
+    oemerAvailable: await isOemerAvailable(),
+    allowFallback: (process.env.OMR_FALLBACK ?? '1') !== '0',
+  })
+
+  if (!choice.primary) {
+    throw new Error('No hay ningún motor OMR disponible. Revisa OMR_ENGINE, Audiveris y oemer.')
   }
 
-  // Default: neural engine first.
-  const primary = await runOemer(filePath)
+  console.log('[omr] engine=%s primary=%s fallback=%s kind=%s', configured, choice.primary, choice.fallback ?? 'none', inputKind)
+  const primary = await runNamed(choice.primary, filePath, signal)
+  throwIfCancelled(signal)
   if (primary) return primary
-
-  if (await isAudiverisAvailable()) {
-    console.warn('[omr] oemer produced no result, falling back to Audiveris')
-    return processOneFile(filePath)
-  }
-  console.warn('[omr] oemer produced no result and Audiveris is not installed')
-  return null
+  if (!choice.fallback) return null
+  console.warn('[omr] %s produced no result, trying %s', choice.primary, choice.fallback)
+  return runNamed(choice.fallback, filePath, signal)
 }
 
 function buildCommand(args: string[]): { cmd: string; args: string[] } {
@@ -62,9 +99,7 @@ function buildCommand(args: string[]): { cmd: string; args: string[] } {
   return { cmd: AUDIVERIS_CMD, args }
 }
 
-// Process a single image through Audiveris and return the MusicXML string.
-// Each call is a separate JVM invocation so memory is freed between pages.
-async function processOneFile(inputPath: string): Promise<string | null> {
+async function processOneFile(inputPath: string, signal?: AbortSignal): Promise<string | null> {
   const outputDir = path.join(os.tmpdir(), `audiveris-output-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`)
   await fs.mkdir(outputDir, { recursive: true })
 
@@ -78,21 +113,19 @@ async function processOneFile(inputPath: string): Promise<string | null> {
     ])
 
     try {
-      await execFileAsync(cmd, args, {
-        timeout: 180_000,
-        maxBuffer: 50 * 1024 * 1024,
-      })
+      const result = await execFileCancelable(cmd, args, { timeout: 180_000, signal })
+      if (result.cancelled) return null
     } catch (execErr: unknown) {
       const killed = (execErr as { killed?: boolean }).killed
+      const cancelled = (execErr as { cancelled?: boolean }).cancelled
       const stderr = (execErr as { stderr?: string }).stderr ?? ''
       const stdout = (execErr as { stdout?: string }).stdout ?? ''
-      console.error('[audiveris] page failed for', inputPath, 'killed=', killed)
+      console.error('[audiveris] page failed for', inputPath, 'killed=', killed, 'cancelled=', cancelled)
       console.error('[audiveris] stderr tail:', stderr.slice(-2000))
       console.error('[audiveris] stdout tail:', stdout.slice(-2000))
 
-      if (killed) return null
+      if (killed || cancelled) return null
 
-      // Check if partial output was produced
       const files = await fs.readdir(outputDir, { recursive: true })
       const hasOutput = files.some(
         (f) => typeof f === 'string' && (f.endsWith('.xml') || f.endsWith('.mxl') || f.endsWith('.musicxml'))
@@ -121,13 +154,12 @@ async function processOneFile(inputPath: string): Promise<string | null> {
   }
 }
 
-// Extract PDF pages to individual PNG images using pdftoppm (poppler-utils).
 async function extractPdfPages(pdfPath: string): Promise<string[]> {
   const outputDir = path.join(os.tmpdir(), `pdf-pages-${Date.now()}`)
   await fs.mkdir(outputDir, { recursive: true })
 
   const dpi = process.env.PDF_DPI ?? '500'
-  await execFileAsync('pdftoppm', [
+  await execFileCancelable('pdftoppm', [
     '-png', '-r', dpi,
     pdfPath,
     path.join(outputDir, 'page'),
@@ -140,16 +172,27 @@ async function extractPdfPages(pdfPath: string): Promise<string[]> {
     .map((f) => path.join(outputDir, f))
 }
 
-// Main entry point: accepts a single image or PDF.
-// For PDFs, extracts pages and processes each one separately to avoid OOM.
-export async function processWithOmr(inputPath: string, isPdf: boolean): Promise<string> {
+export async function processWithOmr(
+  inputPath: string,
+  isPdf: boolean,
+  opts: OmrRunOptions = {}
+): Promise<string> {
+  const { onProgress, signal } = opts
+  const inputKind = opts.inputKind ?? (isPdf ? 'pdf' : 'image')
+
   if (!isPdf) {
-    const result = await runEngine(inputPath)
+    onProgress?.({
+      stage: 'recognize',
+      page: 1,
+      pageCount: 1,
+      message: 'Reconociendo la partitura…',
+    })
+    const result = await runEngine(inputPath, inputKind, signal)
     if (result) return result
     throw new Error('No se pudo procesar la imagen. Verifica que sea una partitura musical legible.')
   }
 
-  // PDF: extract pages, process each one separately to stay within memory limits
+  onProgress?.({ stage: 'rasterize', message: 'Preparando las páginas del PDF…' })
   let pageFiles: string[] = []
   try {
     pageFiles = await extractPdfPages(inputPath)
@@ -161,37 +204,50 @@ export async function processWithOmr(inputPath: string, isPdf: boolean): Promise
     throw new Error('El PDF no contiene páginas válidas.')
   }
 
-  console.log('[audiveris] PDF has %d pages, processing each separately', pageFiles.length)
+  console.log('[omr] PDF has %d pages, processing each separately', pageFiles.length)
 
   const results: string[] = []
-  for (let i = 0; i < pageFiles.length; i++) {
-    console.log('[audiveris] processing page %d/%d', i + 1, pageFiles.length)
+  try {
+    for (let i = 0; i < pageFiles.length; i++) {
+      throwIfCancelled(signal)
+      onProgress?.({
+        stage: 'recognize',
+        page: i + 1,
+        pageCount: pageFiles.length,
+        message: `Leyendo página ${i + 1} de ${pageFiles.length}…`,
+      })
 
-    // Run the rendered page through the same grayscale/normalize/upscale
-    // pipeline as direct image uploads so embedded low-res screenshots get
-    // enough resolution for reliable notehead detection.
-    let pagePath = pageFiles[i]
-    let preprocessed: string | null = null
-    try {
-      preprocessed = await preprocessImage(pageFiles[i])
-      pagePath = preprocessed
-    } catch (err) {
-      console.error('[audiveris] preprocess failed for page, using raw render:', err)
-    }
+      let pagePath = pageFiles[i]
+      let preprocessed: string | null = null
+      try {
+        onProgress?.({
+          stage: 'preprocess',
+          page: i + 1,
+          pageCount: pageFiles.length,
+          message: `Preparando página ${i + 1} de ${pageFiles.length}…`,
+        })
+        preprocessed = await preprocessImage(pageFiles[i])
+        pagePath = preprocessed
+      } catch (err) {
+        console.error('[omr] preprocess failed for page, using raw render:', err)
+      }
 
-    const result = await runEngine(pagePath)
-    if (result) {
-      results.push(result)
+      const result = await runEngine(pagePath, 'pdf', signal)
+      if (result) results.push(result)
+      await fs.unlink(pageFiles[i]).catch(() => {})
+      if (preprocessed) await fs.unlink(preprocessed).catch(() => {})
     }
-    // Clean up page images immediately to free disk space
-    await fs.unlink(pageFiles[i]).catch(() => {})
-    if (preprocessed) await fs.unlink(preprocessed).catch(() => {})
+  } finally {
+    if (pageFiles.length > 0) {
+      const pagesDir = path.dirname(pageFiles[0])
+      await fs.rm(pagesDir, { recursive: true, force: true }).catch(() => {})
+    }
   }
 
-  // Clean up the pages directory
-  if (pageFiles.length > 0) {
-    const pagesDir = path.dirname(pageFiles[0])
-    await fs.rm(pagesDir, { recursive: true, force: true }).catch(() => {})
+  if (signal?.aborted) {
+    const err = new Error('Reconocimiento cancelado')
+    err.name = 'AbortError'
+    throw err
   }
 
   if (results.length === 0) {
@@ -203,8 +259,8 @@ export async function processWithOmr(inputPath: string, isPdf: boolean): Promise
   try {
     return mergeMusicXmlPages(results)
   } catch (mergeErr) {
-    console.error('[audiveris] merge failed, returning longest page:', mergeErr)
-    return results.reduce((best, r) => r.length > best.length ? r : best)
+    console.error('[omr] merge failed, returning longest page:', mergeErr)
+    return results.reduce((best, r) => (r.length > best.length ? r : best))
   }
 }
 

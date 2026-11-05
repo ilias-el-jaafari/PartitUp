@@ -20,6 +20,7 @@ export async function preprocessImage(inputPath: string): Promise<string> {
   const meta = await sharp(inputPath).metadata()
   const sourceWidth = meta.width ?? MAX_WIDTH
 
+  const sharpen = (process.env.OMR_SHARPEN ?? '1') !== '0'
   let pipeline = sharp(inputPath).grayscale().normalize()
 
   if (sourceWidth > MAX_WIDTH) {
@@ -28,6 +29,12 @@ export async function preprocessImage(inputPath: string): Promise<string> {
   } else if (sourceWidth < MIN_WIDTH) {
     // Upscale small screenshots so the staff interline is large enough.
     pipeline = pipeline.resize({ width: MIN_WIDTH, kernel: 'lanczos3' })
+  }
+
+  // A light unsharp mask helps staff lines and noteheads on phone photos
+  // without binarizing (binarizing eats hollow noteheads).
+  if (sharpen) {
+    pipeline = pipeline.sharpen({ sigma: sourceWidth < MIN_WIDTH ? 0.8 : 0.45 })
   }
 
   await pipeline.withMetadata({ density: 300 }).png().toFile(outputPath)

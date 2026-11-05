@@ -227,20 +227,8 @@ export function rewriteMidiChannels(args: {
     return { midiBase64: args.fallbackMidiBase64, channelMap: args.fallbackChannelMap, rewritten: false }
   }
 
-  // Unmatched note-ons (piano, failed matches) go to the unused drum channel and stay silent.
-  for (const event of ons) {
-    if (used.has(event) || !event.note) continue
-    const pair = event.note.pair
-    const from = event.note.channel
-    const pitch = event.note.pitch
-    for (const track of decoded.tracks) {
-      for (const other of track) {
-        if (other.note && other.note.pair === pair && other.note.channel === from && other.note.pitch === pitch) {
-          retarget(other, 9)
-        }
-      }
-    }
-  }
+  // Notes that did not match a voice stay on their own channel. Silencing them
+  // used to hide a whole choir part whenever matching missed it.
 
   return {
     midiBase64: encodeMidi(decoded.ppq, decoded.tracks),
@@ -272,6 +260,27 @@ export function midiFromNotes(
   events.push({ tick: events[events.length - 1]?.tick ?? 0, data: [0xff, 0x2f, 0x00] })
   events.sort((a, b) => a.tick - b.tick)
   return encodeMidi(ppq, [events])
+}
+
+const SUSTAIN_CONTROLLERS = new Set([64, 66])
+
+// A stuck damper pedal (CC 64/66 with no release) makes every note ring
+// through the written rests. Choir scores never need that pedal.
+export function withoutSustainPedal(midiBase64: string): string {
+  const decoded = decodeMidi(midiBase64)
+  if (!decoded) return midiBase64
+  let removed = false
+  for (const track of decoded.tracks) {
+    for (let i = track.length - 1; i >= 0; i--) {
+      const data = track[i].data
+      const status = data[0] ?? 0
+      if ((status & 0xf0) === 0xb0 && SUSTAIN_CONTROLLERS.has(data[1] ?? -1)) {
+        track.splice(i, 1)
+        removed = true
+      }
+    }
+  }
+  return removed ? encodeMidi(decoded.ppq, decoded.tracks) : midiBase64
 }
 
 export function listNoteOns(midiBase64: string): { tick: number; pitch: number; channel: number }[] {

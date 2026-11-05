@@ -13,6 +13,7 @@ export interface VoiceStream {
   voice: number
   layers: number[]
   notes: NoteInfo[]
+  lyricCount: number
   minPitch: number
   maxPitch: number
   avgPitch: number
@@ -127,6 +128,7 @@ export function parseMusicXmlVoices(xmlString: string): VoiceStream[] {
           voice,
           layers: [voice],
           notes: [],
+          lyricCount: 0,
           minPitch: midiPitch,
           maxPitch: midiPitch,
           avgPitch: 0,
@@ -134,6 +136,8 @@ export function parseMusicXmlVoices(xmlString: string): VoiceStream[] {
       }
       const stream = streamsMap.get(key)!
       stream.notes.push({ pitch: midiPitch })
+      const lyric = Array.from(note.querySelectorAll('lyric text')).map((node) => node.textContent ?? '').join('')
+      if (/[\p{L}]{2,}/u.test(lyric)) stream.lyricCount += 1
       stream.minPitch = Math.min(stream.minPitch, midiPitch)
       stream.maxPitch = Math.max(stream.maxPitch, midiPitch)
     })
@@ -186,6 +190,7 @@ function mergeMinorVoices(streams: VoiceStream[]): VoiceStream[] {
         continue
       }
       dominant.notes.push(...s.notes)
+      dominant.lyricCount += s.lyricCount
       dominant.minPitch = Math.min(dominant.minPitch, s.minPitch)
       dominant.maxPitch = Math.max(dominant.maxPitch, s.maxPitch)
       for (const layer of s.layers) {
@@ -348,7 +353,9 @@ export interface IdentifyOptions {
 
 export function analyzeVoices(musicXml: string, options: IdentifyOptions = {}): VoiceAnalysis {
   const allStreams = parseMusicXmlVoices(musicXml)
-  const vocalStreams = allStreams.filter((s) => isVocalPart(s.partName))
+  // A part named Piano is accompaniment only when nobody is singing on it.
+  // OMR often files a real voice under that name; those notes must stay.
+  const vocalStreams = allStreams.filter((s) => isVocalPart(s.partName) || s.lyricCount > 0)
   let streams = (vocalStreams.length > 0 ? vocalStreams : allStreams)
     .filter((s) => s.avgPitch >= 34 && s.avgPitch <= 96)
 
@@ -412,7 +419,7 @@ export function analyzeVoices(musicXml: string, options: IdentifyOptions = {}): 
 
   const voices = streams.map((stream, i) => {
     const type = types[i] ?? VoiceType.UNASSIGNED
-    const partLabel = !isGenericPartName(stream.partName) && stream.partName !== stream.partId
+    const partLabel = isVocalPart(stream.partName) && !isGenericPartName(stream.partName) && stream.partName !== stream.partId
       ? stream.partName.trim()
       : ''
     const rangeWidth = stream.maxPitch - stream.minPitch
@@ -498,7 +505,13 @@ export function stripNonVocalParts(musicXml: string): string {
     totalParts++
     const id = sp.getAttribute('id') ?? ''
     const name = sp.querySelector('part-name')?.textContent?.trim() ?? ''
-    if (NON_VOCAL_PATTERNS.test(name)) nonVocalIds.push(id)
+    if (!NON_VOCAL_PATTERNS.test(name)) return
+    const part = doc.querySelector(`part[id="${id}"]`)
+    const lyric = part
+      ? Array.from(part.querySelectorAll('lyric text')).map((node) => node.textContent ?? '').join(' ')
+      : ''
+    if (/[\p{L}]{2,}/u.test(lyric)) return
+    nonVocalIds.push(id)
   })
 
   if (nonVocalIds.length === 0 || nonVocalIds.length === totalParts) return musicXml

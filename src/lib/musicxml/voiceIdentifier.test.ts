@@ -104,6 +104,19 @@ describe('stripNonVocalParts', () => {
     expect(stripped).not.toContain('Piano')
   })
 
+  it('keeps a part named Piano when the notes carry lyrics', () => {
+    const sung = `<note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><lyric><text>Donne</text></lyric></note>`
+    const xml = score([
+      { id: 'P1', name: 'Voice', body: line('A', 4, 4) },
+      { id: 'P2', name: 'Piano', body: sung + line('C', 3, 2) },
+    ])
+    const stripped = stripNonVocalParts(xml)
+    expect(stripped).toContain('Voice')
+    expect(stripped).toContain('Donne')
+    const analysis = analyzeVoices(xml)
+    expect(analysis.voices.length).toBeGreaterThan(1)
+  })
+
   it('returns the original string when every part is vocal', () => {
     const xml = score([{ id: 'P1', name: 'Soprano', body: line('C', 5, 2) }])
     expect(stripNonVocalParts(xml)).toBe(xml)

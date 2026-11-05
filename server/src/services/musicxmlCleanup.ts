@@ -151,6 +151,17 @@ function stripGarbageWords(doc: Document) {
   }
 }
 
+function noteIsSung(note: Element): boolean {
+  for (const lyric of elementChildren(note).filter((child) => child.localName === 'lyric')) {
+    const raw = elementChildren(lyric)
+      .filter((child) => child.localName === 'text')
+      .map((child) => child.textContent ?? '')
+      .join('')
+    if (/[\p{L}]{2,}/u.test(raw)) return true
+  }
+  return false
+}
+
 function mergeMinorVoices(doc: Document) {
   const parts = localElements(doc, 'part').filter((p) => p.parentNode && (p.parentNode as Element).localName !== 'part-list')
   for (const part of parts) {
@@ -170,6 +181,12 @@ function mergeMinorVoices(doc: Document) {
       const threshold = Math.max(4, Math.floor(0.12 * dominantCount))
       const keep = new Set(ranked.filter(([, n]) => n >= threshold).map(([v]) => v))
       if (keep.size === 0) keep.add(dominantVoice)
+      // Two sung lines on one staff (SA, divisi) must not be folded into one.
+      for (const [voice, count] of ranked) {
+        if (count < 2) continue
+        const sung = group.some((event) => event.voice === voice && noteIsSung(event.note))
+        if (sung) keep.add(voice)
+      }
       const keptOnsets = new Set(group.filter((e) => keep.has(e.voice)).map((e) => e.onset))
       for (const ev of group) {
         if (keep.has(ev.voice)) continue
@@ -193,9 +210,19 @@ function dropTinyParts(doc: Document) {
   for (const c of counts) {
     if (c.pitched >= 4) continue
     if (c.pitched > largest * 0.05) continue
+    if (collectPartEvents(c.part).some((event) => event.pitched && noteIsSung(event.note))) continue
     removeEl(c.part)
     const sp = scoreParts.find((s) => s.getAttribute('id') === c.id)
     if (sp) removeEl(sp)
+  }
+}
+
+function stripDamperPedal(doc: Document) {
+  for (const pedal of localElements(doc, 'pedal')) removeEl(pedal)
+  for (const sound of localElements(doc, 'sound')) {
+    if (!sound.hasAttribute('damper-pedal')) continue
+    sound.removeAttribute('damper-pedal')
+    if (sound.attributes.length === 0) removeEl(sound)
   }
 }
 
@@ -222,6 +249,7 @@ export function cleanupMusicXml(xml: string): string {
     mergeMinorVoices(doc)
     dropTinyParts(doc)
   }
+  stripDamperPedal(doc)
 
   const body = new XMLSerializer().serializeToString(doc)
   if (xml.startsWith('<?xml') && !body.startsWith('<?xml')) {

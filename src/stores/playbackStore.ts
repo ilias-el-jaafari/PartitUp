@@ -130,8 +130,10 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
   updateTime: () => {
     const time = getCurrentTime()
     const paused = isPaused()
+    const nextDuration = getDuration()
     set({
       currentTime: time,
+      duration: nextDuration > 0 ? nextDuration : get().duration,
       isPlaying: !paused,
     })
   },

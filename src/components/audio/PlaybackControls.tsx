@@ -4,6 +4,7 @@ import { usePlaybackStore } from '../../stores/playbackStore'
 import { useScoreStore } from '../../stores/scoreStore'
 import { useVoiceStore } from '../../stores/voiceStore'
 import { buildWavFilename } from '../../lib/audio/exportName'
+import { resumeAudioContext } from '../../lib/audio/synthesizer'
 import { VOICE_LABELS, VoiceType } from '../../types/voice'
 
 function formatTime(seconds: number): string {
@@ -94,7 +95,13 @@ export function PlaybackControls() {
               <Square className="w-4 h-4" />
             </button>
             <button
-              onClick={isPlaying ? pause : play}
+              onClick={() => {
+                // Resume in this turn, before play() awaits. Otherwise Safari
+                // keeps the audio device suspended and the choir is silent.
+                resumeAudioContext()
+                if (isPlaying) pause()
+                else void play()
+              }}
               disabled={!isReady}
               className="p-2 rounded-lg bg-blue-500 text-white hover:bg-blue-600 disabled:opacity-30 transition-colors"
               title={isPlaying ? 'Pausar' : 'Reproducir'}

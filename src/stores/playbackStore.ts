@@ -11,7 +11,9 @@ import {
   isPaused,
   renderToWav,
   applyVoiceSettings,
+  seekTo,
 } from '../lib/audio/synthesizer'
+import { savePreferences } from '../lib/memory/practiceMemory'
 import { useVoiceStore } from './voiceStore'
 
 interface PlaybackState {
@@ -31,12 +33,13 @@ interface PlaybackState {
   pause: () => void
   stop: () => void
   setTempo: (tempo: number) => void
+  seek: (seconds: number) => void
   updateTime: () => void
   exportWav: (midiBase64: string) => Promise<Blob | null>
   reset: () => void
 }
 
-export const usePlaybackStore = create<PlaybackState>((set) => ({
+export const usePlaybackStore = create<PlaybackState>((set, get) => ({
   isPlaying: false,
   isReady: false,
   isLoading: false,
@@ -63,6 +66,7 @@ export const usePlaybackStore = create<PlaybackState>((set) => ({
 
       const voiceState = useVoiceStore.getState()
       applyVoiceSettings(voiceState.voices, voiceState.channelMap)
+      setPlaybackRate(get().tempo)
 
       set({
         isLoading: false,
@@ -85,6 +89,7 @@ export const usePlaybackStore = create<PlaybackState>((set) => ({
       await loadMidiData(midiBase64)
       const voiceState = useVoiceStore.getState()
       applyVoiceSettings(voiceState.voices, voiceState.channelMap)
+      setPlaybackRate(get().tempo)
       set({ isPlaying: false, currentTime: 0, duration: getDuration() })
     } catch (err) {
       set({ error: err instanceof Error ? err.message : 'Error recargando audio' })
@@ -111,8 +116,15 @@ export const usePlaybackStore = create<PlaybackState>((set) => ({
   },
 
   setTempo: (tempo: number) => {
-    setPlaybackRate(tempo)
-    set({ tempo })
+    const next = Math.max(0.25, Math.min(2, tempo))
+    setPlaybackRate(next)
+    set({ tempo: next })
+    void savePreferences({ tempo: next })
+  },
+
+  seek: (seconds: number) => {
+    seekTo(seconds)
+    set({ currentTime: seconds })
   },
 
   updateTime: () => {

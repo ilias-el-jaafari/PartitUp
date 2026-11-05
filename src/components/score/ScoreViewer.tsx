@@ -24,7 +24,7 @@ export function ScoreViewer() {
   if (!svgContent) return null
 
   return (
-    <div className="flex-1 flex flex-col bg-gray-50 overflow-hidden">
+    <div className="flex-1 flex flex-col bg-gray-50 overflow-hidden min-w-0 min-h-0">
       <CorrectionToolbar />
 
       <div className="bg-white border-b border-gray-200 px-4 py-2 flex items-center justify-between shrink-0">
@@ -37,7 +37,7 @@ export function ScoreViewer() {
             <ChevronLeft className="w-5 h-5" />
           </button>
           <span className="text-sm text-gray-600 min-w-[80px] text-center">
-            Pagina {currentPage} de {pageCount}
+            Página {currentPage} de {pageCount}
           </span>
           <button
             onClick={nextPage}

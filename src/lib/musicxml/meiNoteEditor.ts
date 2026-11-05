@@ -21,18 +21,29 @@ function accidGesForKey(pname: string, fifths: number): string | null {
   return null
 }
 
+function elementsByLocalName(root: ParentNode, name: string): Element[] {
+  const found: Element[] = []
+  const visit = (node: Node) => {
+    if (node.nodeType !== 1) return
+    const el = node as Element
+    if ((el.localName || el.tagName).toLowerCase() === name) found.push(el)
+    for (let i = 0; i < el.childNodes.length; i++) visit(el.childNodes[i])
+  }
+  const start = 'documentElement' in root ? (root as Document).documentElement : (root as Element)
+  if (start) visit(start)
+  return found
+}
+
 function forEachMatchingNote(
   doc: Document,
   ids: Set<string>,
   fn: (note: Element) => void
 ): void {
-  const notes = doc.getElementsByTagNameNS('*', 'note')
-  // Collect first because fn may replace nodes (mutating the live collection).
-  const matches: Element[] = []
-  for (let i = 0; i < notes.length; i++) {
-    const id = elementId(notes[i])
-    if (id && ids.has(id)) matches.push(notes[i])
-  }
+  // Collect first because fn may replace nodes.
+  const matches = elementsByLocalName(doc, 'note').filter((note) => {
+    const id = elementId(note)
+    return Boolean(id && ids.has(id))
+  })
   matches.forEach(fn)
 }
 
@@ -69,7 +80,7 @@ export function transposeNotesDiatonic(
     else note.removeAttribute('accid.ges')
     note.removeAttribute('accid')
     // Drop any explicit displayed accidental child so the key signature applies.
-    Array.from(note.getElementsByTagNameNS('*', 'accid')).forEach((a) => a.remove())
+    elementsByLocalName(note, 'accid').forEach((a) => a.remove())
   })
 
   return new XMLSerializer().serializeToString(doc)
@@ -100,7 +111,7 @@ function previousNotePitch(el: Element): { pname: string; oct: number } | null {
     if (sib.localName === 'note' && sib.getAttribute('pname')) {
       return { pname: sib.getAttribute('pname')!, oct: parseInt(sib.getAttribute('oct') ?? '4', 10) }
     }
-    const inner = Array.from(sib.getElementsByTagNameNS('*', 'note'))
+    const inner = elementsByLocalName(sib, 'note')
     if (inner.length > 0) {
       const n = inner[inner.length - 1]
       return { pname: n.getAttribute('pname') ?? 'b', oct: parseInt(n.getAttribute('oct') ?? '4', 10) }
@@ -121,7 +132,7 @@ export function restsToNotes(
   const doc = new DOMParser().parseFromString(mei, 'application/xml')
   const ids = new Set(restIds)
 
-  const rests = Array.from(doc.getElementsByTagNameNS('*', 'rest'))
+  const rests = elementsByLocalName(doc, 'rest')
   for (const rest of rests) {
     const id = elementId(rest)
     if (!id || !ids.has(id)) continue

@@ -1,4 +1,11 @@
 import { create } from 'zustand'
+import { requestPracticeRefresh } from './practiceRefresh'
+
+let beforeVoiceEdit: (() => void) | null = null
+
+export function setBeforeVoiceEdit(fn: () => void) {
+  beforeVoiceEdit = fn
+}
 
 interface CorrectionOp {
   noteIds: string[]
@@ -14,12 +21,15 @@ interface CorrectionState {
   undoStack: CorrectionOp[]
   redoStack: CorrectionOp[]
   isSelecting: boolean
+  correctionMode: boolean
 
   selectNote: (noteId: string, addToSelection: boolean) => void
   selectNotes: (noteIds: string[]) => void
   clearSelection: () => void
   setSelecting: (selecting: boolean) => void
+  setCorrectionMode: (enabled: boolean) => void
   reassignSelectedTo: (voiceId: string) => void
+  replaceOverrides: (overrides: Record<string, string>, refresh?: boolean) => void
   undo: () => void
   redo: () => void
   reset: () => void
@@ -31,6 +41,7 @@ export const useCorrectionStore = create<CorrectionState>((set, get) => ({
   undoStack: [],
   redoStack: [],
   isSelecting: false,
+  correctionMode: false,
 
   selectNote: (noteId: string, addToSelection: boolean) => {
     const current = get().selectedNoteIds
@@ -55,9 +66,15 @@ export const useCorrectionStore = create<CorrectionState>((set, get) => ({
     set({ isSelecting: selecting })
   },
 
+  setCorrectionMode: (enabled: boolean) => {
+    set({ correctionMode: enabled })
+  },
+
   reassignSelectedTo: (voiceId: string) => {
     const { selectedNoteIds, noteVoiceOverrides } = get()
     if (selectedNoteIds.size === 0) return
+
+    beforeVoiceEdit?.()
 
     const noteIds = Array.from(selectedNoteIds)
     const prev: Record<string, string | undefined> = {}
@@ -74,6 +91,12 @@ export const useCorrectionStore = create<CorrectionState>((set, get) => ({
       redoStack: [],
       selectedNoteIds: new Set(),
     }))
+    requestPracticeRefresh()
+  },
+
+  replaceOverrides: (overrides, refresh = true) => {
+    set({ noteVoiceOverrides: { ...overrides } })
+    if (refresh) requestPracticeRefresh()
   },
 
   undo: () => {
@@ -96,6 +119,7 @@ export const useCorrectionStore = create<CorrectionState>((set, get) => ({
       undoStack: state.undoStack.slice(0, -1),
       redoStack: [...state.redoStack, op],
     }))
+    requestPracticeRefresh()
   },
 
   redo: () => {
@@ -113,6 +137,7 @@ export const useCorrectionStore = create<CorrectionState>((set, get) => ({
       redoStack: state.redoStack.slice(0, -1),
       undoStack: [...state.undoStack, op],
     }))
+    requestPracticeRefresh()
   },
 
   reset: () => {
@@ -122,6 +147,7 @@ export const useCorrectionStore = create<CorrectionState>((set, get) => ({
       undoStack: [],
       redoStack: [],
       isSelecting: false,
+      correctionMode: false,
     })
   },
 }))

@@ -3,25 +3,26 @@ import { useCorrectionStore } from '../stores/correctionStore'
 import { useScoreStore } from '../stores/scoreStore'
 
 export function useKeyboardShortcuts() {
-  const undo = useCorrectionStore((s) => s.undo)
-  const redo = useCorrectionStore((s) => s.redo)
   const clearSelection = useCorrectionStore((s) => s.clearSelection)
 
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
+      const target = e.target as HTMLElement | null
+      const tag = target?.tagName
+      if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return
+
       const score = useScoreStore.getState()
-      const hasSelection = useCorrectionStore.getState().selectedNoteIds.size > 0
+      const correction = useCorrectionStore.getState()
+      const hasSelection = correction.selectedNoteIds.size > 0
 
       if (e.key === 'z' && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
         e.preventDefault()
-        // Undo a note edit if any, otherwise undo a voice reassignment.
-        if (score.editUndo.length > 0) score.undoEdit()
-        else undo()
+        void score.undoEdit()
         return
       }
       if (e.key === 'z' && (e.ctrlKey || e.metaKey) && e.shiftKey) {
         e.preventDefault()
-        redo()
+        void score.redoEdit()
         return
       }
       if (e.key === 'Escape') {
@@ -29,8 +30,7 @@ export function useKeyboardShortcuts() {
         return
       }
 
-      // Note correction (Fase D) — only when notes are selected.
-      if (!hasSelection) return
+      if (!correction.correctionMode || !hasSelection) return
       if (e.key === 'ArrowUp') {
         e.preventDefault()
         score.nudgeSelectedNotes(e.shiftKey ? 7 : 1)
@@ -48,5 +48,5 @@ export function useKeyboardShortcuts() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [undo, redo, clearSelection])
+  }, [clearSelection])
 }

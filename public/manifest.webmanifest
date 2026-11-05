@@ -1,0 +1,19 @@
+{
+  "name": "PartitUp — Ensayo coral",
+  "short_name": "PartitUp",
+  "description": "Practica tu voz con la partitura del coro.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "lang": "es",
+  "background_color": "#f8f9fa",
+  "theme_color": "#1d4ed8",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

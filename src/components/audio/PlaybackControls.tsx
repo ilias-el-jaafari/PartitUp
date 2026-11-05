@@ -2,6 +2,9 @@ import { useEffect, useRef, useCallback } from 'react'
 import { Play, Pause, Square, Download, Loader2, Minus, Plus } from 'lucide-react'
 import { usePlaybackStore } from '../../stores/playbackStore'
 import { useScoreStore } from '../../stores/scoreStore'
+import { useVoiceStore } from '../../stores/voiceStore'
+import { buildWavFilename } from '../../lib/audio/exportName'
+import { VOICE_LABELS, VoiceType } from '../../types/voice'
 
 function formatTime(seconds: number): string {
   const mins = Math.floor(seconds / 60)
@@ -11,17 +14,31 @@ function formatTime(seconds: number): string {
 
 export function PlaybackControls() {
   const midiBase64 = useScoreStore((s) => s.midiBase64)
+  const fileName = useScoreStore((s) => s.fileName)
+  const voices = useVoiceStore((s) => s.voices)
   const {
     isPlaying, isReady, isLoading, currentTime, duration, tempo, error,
     isExporting, exportProgress,
-    initAndLoad, play, pause, stop, setTempo, updateTime, exportWav,
+    initAndLoad, reloadMidi, play, pause, stop, setTempo, seek, updateTime, exportWav,
   } = usePlaybackStore()
   const animRef = useRef<number>(0)
 
+  const loadedRef = useRef<string | null>(null)
   useEffect(() => {
-    if (!midiBase64) return
-    initAndLoad(midiBase64)
-  }, [midiBase64, initAndLoad])
+    if (!midiBase64) {
+      loadedRef.current = null
+      return
+    }
+    if (loadedRef.current === null) {
+      loadedRef.current = midiBase64
+      void initAndLoad(midiBase64)
+      return
+    }
+    if (loadedRef.current !== midiBase64) {
+      loadedRef.current = midiBase64
+      void reloadMidi(midiBase64)
+    }
+  }, [midiBase64, initAndLoad, reloadMidi])
 
   const tick = useCallback(() => {
     updateTime()
@@ -44,7 +61,11 @@ export function PlaybackControls() {
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = 'partitup-audio.wav'
+      const solo = voices.find((voice) => voice.solo)
+      const voiceLabel = solo
+        ? (solo.type !== VoiceType.UNASSIGNED ? VOICE_LABELS[solo.type] : solo.label)
+        : null
+      a.download = buildWavFilename(fileName, voiceLabel)
       a.click()
       URL.revokeObjectURL(url)
     }
@@ -53,7 +74,7 @@ export function PlaybackControls() {
   if (!midiBase64) return null
 
   return (
-    <div className="bg-white border-t border-gray-200 px-4 py-3 flex items-center gap-4 shrink-0">
+    <div className="bg-white border-t border-gray-200 px-3 sm:px-4 py-3 flex items-center gap-3 sm:gap-4 shrink-0 flex-wrap">
       {isLoading ? (
         <div className="flex items-center gap-2 text-sm text-gray-500">
           <Loader2 className="w-4 h-4 animate-spin" />
@@ -82,14 +103,19 @@ export function PlaybackControls() {
             </button>
           </div>
 
-          <div className="flex items-center gap-2 text-sm text-gray-600 min-w-[120px]">
+          <div className="flex items-center gap-2 text-sm text-gray-600 min-w-[140px] flex-1">
             <span>{formatTime(currentTime)}</span>
-            <div className="flex-1 h-1 bg-gray-200 rounded-full overflow-hidden min-w-[60px]">
-              <div
-                className="h-full bg-blue-500 rounded-full transition-all"
-                style={{ width: `${duration > 0 ? (currentTime / duration) * 100 : 0}%` }}
-              />
-            </div>
+            <input
+              type="range"
+              min={0}
+              max={duration || 0}
+              step={0.1}
+              value={Math.min(currentTime, duration || 0)}
+              disabled={!isReady || duration <= 0}
+              onChange={(e) => seek(parseFloat(e.target.value))}
+              className="flex-1 h-1.5 accent-blue-500 cursor-pointer disabled:cursor-default"
+              aria-label="Posición del ensayo"
+            />
             <span>{formatTime(duration)}</span>
           </div>
 

@@ -82,6 +82,13 @@ export function setPlaybackRate(rate: number) {
   }
 }
 
+export function seekTo(seconds: number) {
+  if (!sequencer) return
+  const duration = sequencer.duration || 0
+  const next = Math.max(0, duration > 0 ? Math.min(seconds, duration) : seconds)
+  sequencer.currentTime = next
+}
+
 export function getCurrentTime(): number {
   return sequencer?.currentHighResolutionTime ?? 0
 }
@@ -101,6 +108,9 @@ export function applyVoiceSettings(
   if (!synth) return
 
   const hasSolo = voices.some((v) => v.solo)
+
+  const drum = synth.midiChannels[9]
+  drum?.setSystemParameter('isMuted', true)
 
   for (const voice of voices) {
     const ch = channelMap?.[voice.id] ?? voices.indexOf(voice)

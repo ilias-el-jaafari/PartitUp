@@ -1,6 +1,8 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { useVoiceStore } from '../../stores/voiceStore'
 import { useCorrectionStore } from '../../stores/correctionStore'
+import { useScoreStore } from '../../stores/scoreStore'
+import { resolveNoteVoices } from '../../lib/musicxml/noteVoices'
 
 interface VoiceHighlighterProps {
   containerRef: React.RefObject<HTMLDivElement | null>
@@ -15,7 +17,12 @@ export function VoiceHighlighter({ containerRef }: VoiceHighlighterProps) {
   const voices = useVoiceStore((s) => s.voices)
   const staffVoiceMap = useVoiceStore((s) => s.staffVoiceMap)
   const noteVoiceOverrides = useCorrectionStore((s) => s.noteVoiceOverrides)
+  const mei = useScoreStore((s) => s.editedMei ?? s.mei)
   const prevStylesRef = useRef<HTMLStyleElement | null>(null)
+  const noteVoices = useMemo(
+    () => (mei ? resolveNoteVoices(mei, voices, noteVoiceOverrides) : {}),
+    [mei, voices, noteVoiceOverrides]
+  )
 
   useEffect(() => {
     const container = containerRef.current
@@ -68,9 +75,12 @@ export function VoiceHighlighter({ containerRef }: VoiceHighlighterProps) {
       }
     })
 
-    // Per-note manual overrides win over staff coloring. Emitted last and keyed
-    // by the note id so the rule is more specific than the staff-level rules.
-    for (const [noteId, voiceId] of Object.entries(noteVoiceOverrides)) {
+    // Divisi (two voices on one staff) and manual reassignment are colored per note,
+    // because a staff-wide color would paint both lines the same.
+    const staffVoices = new Set(Object.values(staffVoiceMap))
+    for (const [noteId, voiceId] of Object.entries(noteVoices)) {
+      const overridden = noteVoiceOverrides[noteId] === voiceId
+      if (!overridden && staffVoices.has(voiceId)) continue
       const voice = voiceById.get(voiceId)
       if (!voice) continue
 
@@ -94,7 +104,7 @@ export function VoiceHighlighter({ containerRef }: VoiceHighlighterProps) {
     return () => {
       styleEl.remove()
     }
-  }, [voices, staffVoiceMap, noteVoiceOverrides, containerRef])
+  }, [voices, staffVoiceMap, noteVoiceOverrides, noteVoices, containerRef])
 
   return null
 }

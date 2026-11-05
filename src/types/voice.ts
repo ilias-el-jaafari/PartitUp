@@ -1,3 +1,18 @@
+export const EnsembleKind = {
+  SATB: 'SATB',
+  SSA: 'SSA',
+  SSAA: 'SSAA',
+  TTBB: 'TTBB',
+  SA: 'SA',
+  TB: 'TB',
+  SAB: 'SAB',
+  TTB: 'TTB',
+  MIXED: 'MIXED',
+  UNISON: 'UNISON',
+} as const
+
+export type EnsembleKind = (typeof EnsembleKind)[keyof typeof EnsembleKind]
+
 export const VoiceType = {
   SOPRANO_1: 'S1',
   SOPRANO_2: 'S2',
@@ -25,6 +40,12 @@ export interface VoiceDefinition {
   volume: number
   partIds: string[]
   noteCount: number
+  /** 0–1. Low values are a hint to check the assignment, not a blocker. */
+  confidence: number
+  /** Verovio / MusicXML staff number (1-based) this voice is read from. */
+  globalStaff: number
+  /** MusicXML voice numbers on that staff that belong to this line. */
+  layers: number[]
 }
 
 export interface VoiceAssignment {

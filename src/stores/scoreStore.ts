@@ -1,24 +1,33 @@
 import { create } from 'zustand'
-import { loadScore, renderPage, getMei, renderFromMei } from '../lib/verovio/scoreRenderer'
+import { loadScore, renderPage, renderFromMei } from '../lib/verovio/scoreRenderer'
 import { detectFileType, type FileInputType } from '../types/score'
-import { processImageOMR } from '../lib/omr/omrClient'
+import { processImageOMR, prewarmOmrBackend, type OmrProgress } from '../lib/omr/omrClient'
 import { transposeNotesDiatonic, deleteNotesToRests, restsToNotes } from '../lib/musicxml/meiNoteEditor'
-import { useCorrectionStore } from './correctionStore'
+import { resolveNoteVoices } from '../lib/musicxml/noteVoices'
+import { rewriteMidiChannels, type SoundingNote } from '../lib/audio/midiChannels'
+import { computeVoiceChannelMap } from '../lib/musicxml/voiceIdentifier'
+import { useCorrectionStore, setBeforeVoiceEdit } from './correctionStore'
 import { usePlaybackStore } from './playbackStore'
+import { useVoiceStore } from './voiceStore'
+import { useEditHistory, type EditSnapshot } from './editHistoryStore'
+import { requestPracticeRefresh, setPracticeRefresh } from './practiceRefresh'
+import { rememberScore } from '../lib/memory/practiceMemory'
 
 interface ScoreState {
   musicXml: string | null
+  mei: string | null
+  editedMei: string | null
   svgContent: string | null
+  rawMidiBase64: string | null
+  fallbackMidiBase64: string | null
+  sounding: SoundingNote[]
   midiBase64: string | null
   pageCount: number
   currentPage: number
   isLoading: boolean
   error: string | null
   fileName: string | null
-
-  // Manual note correction (Fase D): editable MEI model + undo history.
-  editedMei: string | null
-  editUndo: string[]
+  omrMessage: string | null
 
   loadFile: (file: File) => Promise<void>
   loadMusicXml: (xml: string, name?: string) => Promise<void>
@@ -26,15 +35,29 @@ interface ScoreState {
   nextPage: () => Promise<void>
   prevPage: () => Promise<void>
   nudgeSelectedNotes: (deltaSteps: number) => Promise<void>
+  nudgeNoteIds: (ids: string[], deltaSteps: number) => Promise<void>
   deleteSelectedNotes: () => Promise<void>
+  deleteNoteIds: (ids: string[]) => Promise<void>
   addNotesFromSelectedRests: () => Promise<void>
   undoEdit: () => Promise<void>
+  redoEdit: () => Promise<void>
+  refreshPracticeMidi: () => void
+  cancelLoad: () => void
   reset: () => void
 }
 
+let activeOmr: AbortController | null = null
+
 function extractFifths(musicXml: string | null): number {
-  const m = musicXml?.match(/<fifths>\s*(-?\d+)\s*<\/fifths>/)
-  return m ? parseInt(m[1], 10) : 0
+  const match = musicXml?.match(/<fifths>\s*(-?\d+)\s*<\/fifths>/)
+  return match ? parseInt(match[1], 10) : 0
+}
+
+function captureSnapshot(state: ScoreState): EditSnapshot {
+  return {
+    mei: state.editedMei ?? state.mei ?? '',
+    overrides: { ...useCorrectionStore.getState().noteVoiceOverrides },
+  }
 }
 
 async function readFileAsText(file: File): Promise<string> {
@@ -46,61 +69,114 @@ async function readFileAsText(file: File): Promise<string> {
   })
 }
 
+function emptyScore(): Pick<ScoreState,
+  'musicXml' | 'mei' | 'editedMei' | 'svgContent' | 'rawMidiBase64' | 'fallbackMidiBase64' |
+  'sounding' | 'midiBase64' | 'pageCount' | 'currentPage' | 'isLoading' | 'error' | 'fileName' | 'omrMessage'
+> {
+  return {
+    musicXml: null,
+    mei: null,
+    editedMei: null,
+    svgContent: null,
+    rawMidiBase64: null,
+    fallbackMidiBase64: null,
+    sounding: [],
+    midiBase64: null,
+    pageCount: 0,
+    currentPage: 1,
+    isLoading: false,
+    error: null,
+    fileName: null,
+    omrMessage: null,
+  }
+}
+
 export const useScoreStore = create<ScoreState>((set, get) => ({
-  musicXml: null,
-  svgContent: null,
-  midiBase64: null,
-  pageCount: 0,
-  currentPage: 1,
-  isLoading: false,
-  error: null,
-  fileName: null,
-  editedMei: null,
-  editUndo: [],
+  ...emptyScore(),
 
   loadFile: async (file: File) => {
-    set({ isLoading: true, error: null, fileName: file.name })
+    activeOmr?.abort()
+    const controller = new AbortController()
+    activeOmr = controller
+    usePlaybackStore.getState().stop()
+    useVoiceStore.getState().reset()
+    useCorrectionStore.getState().reset()
+    useEditHistory.getState().reset()
+    set({
+      isLoading: true,
+      error: null,
+      fileName: file.name,
+      omrMessage: null,
+      svgContent: null,
+      musicXml: null,
+      mei: null,
+      editedMei: null,
+      midiBase64: null,
+    })
     try {
       const fileType: FileInputType = detectFileType(file)
-
       let xml: string
       if (fileType === 'musicxml') {
         xml = await readFileAsText(file)
       } else if (fileType === 'image' || fileType === 'pdf') {
-        const result = await processImageOMR(file)
-        if (result.status === 'error') {
+        set({ omrMessage: 'Despertando el servidor…' })
+        prewarmOmrBackend()
+        const result = await processImageOMR(file, {
+          signal: controller.signal,
+          onProgress: (progress: OmrProgress) => {
+            if (activeOmr === controller) set({ omrMessage: progress.message })
+          },
+        })
+        if (result.status === 'error' || !result.musicXml) {
           throw new Error(result.message || 'Error procesando la partitura')
         }
         xml = result.musicXml
       } else {
-        throw new Error('Formato MIDI aún no soportado. Sube un archivo MusicXML, imagen o PDF.')
+        throw new Error('Los archivos MIDI no traen la partitura. Sube MusicXML, una imagen o un PDF.')
       }
-
+      if (controller.signal.aborted) return
       await get().loadMusicXml(xml, file.name)
     } catch (err) {
+      if (controller.signal.aborted) {
+        set({ isLoading: false, omrMessage: null, error: null })
+        return
+      }
       set({
         isLoading: false,
+        omrMessage: null,
         error: err instanceof Error ? err.message : 'Error desconocido',
       })
+    } finally {
+      if (activeOmr === controller) activeOmr = null
     }
   },
 
   loadMusicXml: async (xml: string, name?: string) => {
-    set({ isLoading: true, error: null })
+    set({ isLoading: true, error: null, omrMessage: 'Preparando la partitura…' })
     try {
       const result = await loadScore(xml)
+      const fileName = name ?? get().fileName
       set({
         musicXml: xml,
+        mei: result.mei,
+        editedMei: null,
         svgContent: result.svg,
-        midiBase64: result.midi,
+        rawMidiBase64: result.midi,
+        fallbackMidiBase64: result.fallbackMidi,
+        sounding: result.sounding,
+        midiBase64: null,
         pageCount: result.pageCount,
         currentPage: 1,
         isLoading: false,
-        fileName: name ?? get().fileName,
+        omrMessage: null,
+        fileName,
       })
+      const tempo = usePlaybackStore.getState().tempo
+      void rememberScore({ fileName: fileName ?? 'partitura', musicXml: xml, tempo })
     } catch (err) {
       set({
         isLoading: false,
+        omrMessage: null,
         error: err instanceof Error ? err.message : 'Error cargando la partitura',
       })
     }
@@ -115,89 +191,147 @@ export const useScoreStore = create<ScoreState>((set, get) => ({
 
   nextPage: async () => {
     const { currentPage, pageCount } = get()
-    if (currentPage < pageCount) {
-      await get().goToPage(currentPage + 1)
-    }
+    if (currentPage < pageCount) await get().goToPage(currentPage + 1)
   },
 
   prevPage: async () => {
     const { currentPage } = get()
-    if (currentPage > 1) {
-      await get().goToPage(currentPage - 1)
-    }
+    if (currentPage > 1) await get().goToPage(currentPage - 1)
   },
 
   nudgeSelectedNotes: async (deltaSteps: number) => {
-    await applyEdit(get, set, (mei, ids) =>
-      transposeNotesDiatonic(mei, ids, deltaSteps, extractFifths(get().musicXml))
+    const ids = Array.from(useCorrectionStore.getState().selectedNoteIds)
+    await get().nudgeNoteIds(ids, deltaSteps)
+  },
+
+  nudgeNoteIds: async (ids, deltaSteps) => {
+    await applyEdit(get, set, ids, (mei, noteIds) =>
+      transposeNotesDiatonic(mei, noteIds, deltaSteps, extractFifths(get().musicXml))
     )
   },
 
   deleteSelectedNotes: async () => {
-    await applyEdit(get, set, (mei, ids) => deleteNotesToRests(mei, ids))
+    const ids = Array.from(useCorrectionStore.getState().selectedNoteIds)
+    await get().deleteNoteIds(ids)
+  },
+
+  deleteNoteIds: async (ids) => {
+    await applyEdit(get, set, ids, (mei, noteIds) => deleteNotesToRests(mei, noteIds))
   },
 
   addNotesFromSelectedRests: async () => {
-    await applyEdit(get, set, (mei, ids) =>
-      restsToNotes(mei, ids, extractFifths(get().musicXml))
-    )
+    const ids = Array.from(useCorrectionStore.getState().selectedNoteIds)
+    await applyEdit(get, set, ids, (mei, noteIds) => restsToNotes(mei, noteIds, extractFifths(get().musicXml)))
   },
 
   undoEdit: async () => {
-    const { editUndo, currentPage } = get()
-    if (editUndo.length === 0) return
-    const prev = editUndo[editUndo.length - 1]
-    const { svg, midi, pageCount } = renderFromMei(prev, currentPage)
-    set({
-      editedMei: prev,
-      editUndo: editUndo.slice(0, -1),
-      svgContent: svg,
-      midiBase64: midi,
-      pageCount,
+    const current = captureSnapshot(get())
+    const prev = useEditHistory.getState().undo(current)
+    if (!prev) return
+    await restoreSnapshot(get, set, prev)
+  },
+
+  redoEdit: async () => {
+    const current = captureSnapshot(get())
+    const next = useEditHistory.getState().redo(current)
+    if (!next) return
+    await restoreSnapshot(get, set, next)
+  },
+
+  refreshPracticeMidi: () => {
+    const state = get()
+    if (!state.rawMidiBase64) return
+    const voices = useVoiceStore.getState().voices.filter((v) => v.partIds.length > 0 || v.globalStaff > 0)
+    const mei = state.editedMei ?? state.mei ?? ''
+    if (voices.length === 0 || !mei) {
+      const fallback = state.fallbackMidiBase64 ?? state.rawMidiBase64
+      if (fallback !== state.midiBase64) set({ midiBase64: fallback })
+      return
+    }
+    const overrides = useCorrectionStore.getState().noteVoiceOverrides
+    const noteVoices = resolveNoteVoices(mei, voices, overrides)
+    const voiceChannels = Object.fromEntries(voices.map((v) => [v.id, v.midiChannel]))
+    const fallbackMap = state.musicXml ? computeVoiceChannelMap(state.musicXml, voices) : voiceChannels
+    const built = rewriteMidiChannels({
+      midiBase64: state.rawMidiBase64,
+      notes: state.sounding,
+      noteVoices,
+      voiceChannels,
+      fallbackMidiBase64: state.fallbackMidiBase64 ?? state.rawMidiBase64,
+      fallbackChannelMap: fallbackMap,
     })
-    await usePlaybackStore.getState().reloadMidi(midi)
+    useVoiceStore.getState().setChannelMap(built.channelMap)
+    if (built.midiBase64 !== get().midiBase64) set({ midiBase64: built.midiBase64 })
+  },
+
+  cancelLoad: () => {
+    activeOmr?.abort()
+    set({ isLoading: false, omrMessage: null })
   },
 
   reset: () => {
-    set({
-      musicXml: null,
-      svgContent: null,
-      midiBase64: null,
-      pageCount: 0,
-      currentPage: 1,
-      isLoading: false,
-      error: null,
-      fileName: null,
-      editedMei: null,
-      editUndo: [],
-    })
+    activeOmr?.abort()
+    usePlaybackStore.getState().reset()
+    useVoiceStore.getState().reset()
+    useCorrectionStore.getState().reset()
+    useEditHistory.getState().reset()
+    set(emptyScore())
   },
 }))
 
-// Apply an MEI edit to the currently selected notes, re-render score + audio,
-// and record the previous MEI for undo. No-op when nothing is selected.
+setPracticeRefresh(() => {
+  useScoreStore.getState().refreshPracticeMidi()
+})
+
+setBeforeVoiceEdit(() => {
+  const state = useScoreStore.getState()
+  if (!state.mei && !state.editedMei) return
+  useEditHistory.getState().push(captureSnapshot(state))
+})
+
+async function restoreSnapshot(
+  get: () => ScoreState,
+  set: (partial: Partial<ScoreState>) => void,
+  snapshot: EditSnapshot
+) {
+  useCorrectionStore.getState().replaceOverrides(snapshot.overrides, false)
+  if (!snapshot.mei) return
+  const rendered = renderFromMei(snapshot.mei, get().currentPage)
+  const editedMei = snapshot.mei === get().mei ? null : snapshot.mei
+  set({
+    editedMei,
+    svgContent: rendered.svg,
+    rawMidiBase64: rendered.midi,
+    fallbackMidiBase64: rendered.fallbackMidi,
+    sounding: rendered.sounding,
+    pageCount: rendered.pageCount,
+  })
+  requestPracticeRefresh()
+}
+
 async function applyEdit(
   get: () => ScoreState,
   set: (partial: Partial<ScoreState>) => void,
+  ids: string[],
   edit: (mei: string, ids: string[]) => string
 ): Promise<void> {
-  const ids = Array.from(useCorrectionStore.getState().selectedNoteIds)
   if (ids.length === 0) return
-
   try {
-    const baseMei = get().editedMei ?? getMei()
+    const baseMei = get().editedMei ?? get().mei
+    if (!baseMei) return
     const newMei = edit(baseMei, ids)
     if (newMei === baseMei) return
-
-    const { svg, midi, pageCount } = renderFromMei(newMei, get().currentPage)
+    useEditHistory.getState().push(captureSnapshot(get()))
+    const rendered = renderFromMei(newMei, get().currentPage)
     set({
       editedMei: newMei,
-      editUndo: [...get().editUndo, baseMei],
-      svgContent: svg,
-      midiBase64: midi,
-      pageCount,
+      svgContent: rendered.svg,
+      rawMidiBase64: rendered.midi,
+      fallbackMidiBase64: rendered.fallbackMidi,
+      sounding: rendered.sounding,
+      pageCount: rendered.pageCount,
     })
-    await usePlaybackStore.getState().reloadMidi(midi)
+    requestPracticeRefresh()
   } catch (err) {
     set({ error: err instanceof Error ? err.message : 'Error editando la nota' })
   }
